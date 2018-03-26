@@ -4,7 +4,7 @@ const program = require("commander");
 const fs = require("fs")
 
 
-const printError = async (e) => e && console.error(e instanceof Error ? e.getMessage() : e)
+const printError = async (e) => e && console.error(e instanceof Error ? e.message : e)
 
 const printErrorAndExit = (e, exitCode = 1) => printError(e).then(() => process.exit(exitCode))
 
