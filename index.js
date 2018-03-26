@@ -102,7 +102,7 @@ program
                     console.log(`Target '${target}' does not exist.  Awaiting creation.`)
                 }
 
-                await awaitCreated(target)
+                await awaitExists(target)
             }
 
             clearKillTimer()
