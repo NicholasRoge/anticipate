@@ -1,52 +1,12 @@
+#!/usr/bin/env node
+
+const program = require("commander");
 const fs = require("fs")
 
-
-const USAGE = "usage: anticipate [-v|--verbose] [-t|--timeout millisec] file"
-
-const OPTIONS = {
-    "--timeout": {run: millisec => parseInt(millisec), argc: 1},
-    "-t": "--timeout",
-    "--verbose": {},
-    "-v": "--verbose"
-}
-
-
-
-const printUsage = async (toStdErr = false) => console[toStdErr ? "error" : "log"](USAGE)
-
-const printUsageAndExit = (exitCode = 0) => printUsage(exitCode != 0).then(process.exit(() => exitCode))
 
 const printError = async (e) => e && console.error(e instanceof Error ? e.getMessage() : e)
 
 const printErrorAndExit = (e, exitCode = 1) => printError(e).then(() => process.exit(exitCode))
-
-const printFileContents = async (file) => process.stdout.write(fs.readFileSync(file).toString()) || file
-
-
-// TODO:  Does not support required options or option defaults
-const processOptions = argv => {
-    argv = !Array.isArray(argv) ? arguments : argv
-
-    const opts = {};
-    while (argv.length > 0) {
-        const arg = argv[0]  // TODO:  Look into why I can't `Array#shift` here
-        argv = argv.slice(1)
-
-        const optionConf = typeof OPTIONS[arg] === "string" ? OPTIONS[OPTIONS[arg]] : OPTIONS[arg];
-        if (!optionConf) printUsageAndExit(1)
-
-        const optionName = (typeof OPTIONS[arg] === "string" ? OPTIONS[arg] : arg).replace(/^--?/, "")
-        if (optionConf.run) {
-            let optionArgv = argv.slice(0, optionConf.argc || 0)
-            argv = argv.slice(optionConf.argc || 0)
-
-            opts[optionName] = optionConf.run(...optionArgv)
-        } else {
-            opts[optionName] = true
-        }
-    } 
-    return opts;
-}
 
 
 const checkExists = async (file) => new Promise(resolve => {
@@ -64,16 +24,52 @@ const awaitExists = async (file) => new Promise(resolve => {
     createNextTimeout()
 })
 
-const checkChanged = async (file, oldStats) => new Promise(resolve => {
+const checkFileChanged = async (file, oldStats) => new Promise(resolve => {
     const stats = fs.statSync(file)
     resolve(stats.mtimeMs !== oldStats.mtimeMs)
 })
 
+const checkDirChanged = async (dir, initialListing) => {
+    const listing = fs.readdirSync(dir);
+    for (const file of listing) {
+        if (initialListing.indexOf(file) === -1) {
+            // A file was created
+            return true;
+        }
+    }
+    for (const file of initialListing) {
+        if (listing.indexOf(file) === -1) {
+            // A file was deleted
+            return true;
+        }
+    }
+    return false;
+}
+
 const awaitChanged = async (file) => new Promise(resolve => {
     const stats = fs.statSync(file)
+    if (stats.isDirectory()) {
+        const initialListing = fs.readdirSync(file);
+        
+        let resolved = false;
+        Promise.race(initialListing.map(dirFile => awaitChanged(`${file}/${dirFile}`))).then(changedFile => {
+            // One of the constituent files has changed.
+            resolved = true
+            resolve(file)
+        })
 
-    const createNextTimeout = () => setTimeout(() => checkChanged(file, stats).then(changed => changed ? resolve(file) : createNextTimeout()), 0)
-    createNextTimeout()
+        const createNextTimeout = () => setTimeout(() => checkDirChanged(file, initialListing).then(changed => {
+            if (changed) {
+                resolve(file)
+            } else if (!resolved) {
+                createNextTimeout()
+            }
+        }), 0);
+        createNextTimeout();
+    } else {
+        const createNextTimeout = () => setTimeout(() => checkFileChanged(file, stats).then(changed => changed ? resolve(file) : createNextTimeout()), 0)
+        createNextTimeout()
+    }
 });
 
 
@@ -85,25 +81,38 @@ const clearKillTimer = () => clearTimeout(killTimerId)
 
 
 
+program
+    .arguments('<path>')
+    //.version('0.1.0')
+    .option('-t, --timeout <timeout>', 'Time will stop watching file before a change has occured.', 0)
+    .option('-v, --verbose')
+    .action(async function (target) {
+        try {
+            initKillTimer(this.timeout)
 
-const argv = process.argv.slice(2);
-if (argv.length === 0) {
-    printUsageAndExit(1)
-}
+            const targetExists = await checkExists(target)
+            if (targetExists) {
+                if (this.verbose) {
+                    console.log(`Target '${target}' exists.  Awaiting modification.`)
+                }
+                
+                await awaitChanged(target)
+            } else {
+                if (this.verbose) {
+                    console.log(`Target '${target}' does not exist.  Awaiting creation.`)
+                }
 
+                await awaitCreated(target)
+            }
 
-const watchedFile = argv.pop()
-const opts = processOptions(argv) 
+            clearKillTimer()
+        } catch (e) {
+            if (this.verbose) printError(e)
+            this.outputHelp()
+        }
+    })
+    .parse(process.argv);
 
-try {
-    initKillTimer(opts.timeout)
-    checkExists(watchedFile)
-        .then(async (exists) => (opts.verbose && console.log(`${watchedFile} ${exists ? "exists" : "does not exist"}`)) || exists)
-        .then(exists => exists ? awaitChanged(watchedFile) : awaitExists(watchedFile))
-        .then(async (file) => (opts.verbose && console.log(`${watchedFile} was modified.`)) || file)
-        .then(printFileContents)
-        .then(clearKillTimer)
-} catch (e) {
-    if (opts.verbose) printError(e)
-    printUsageAndExit(1)
+if (program.args.length === 0) {
+    program.outputHelp()
 }
